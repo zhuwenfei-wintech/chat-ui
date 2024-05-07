@@ -4,12 +4,13 @@ export async function searchWebLocal(query: string) {
 	const abortController = new AbortController();
 	setTimeout(() => abortController.abort(), 10000);
 
-	const htmlString = await fetch("https://www.google.com/search?hl=en&q=" + query, {
+	// const htmlString = await fetch("https://cn.bing.com/search?q=" + query, {
+	const htmlString = await fetch("https://www.baidu.com/s?wd=" + query, {
 		signal: abortController.signal,
+		headers: {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
 	})
 		.then((response) => response.text())
 		.catch();
-
 	const virtualConsole = new VirtualConsole();
 
 	virtualConsole.on("error", () => {
@@ -34,10 +35,11 @@ export async function searchWebLocal(query: string) {
 	// and do not contain google.com links
 	// and strip them up to '&sa='
 	const linksHref = Array.from(links)
-		.filter((el) => el.href?.startsWith("/url?q=") && !el.href.includes("google.com/"))
+		.filter((el) => el.href?.startsWith("http://www.baidu.com/link?url="))
 		.map((el) => {
 			const link = el.href;
-			return link.slice("/url?q=".length, link.indexOf("&sa="));
+			return link;
+			// return link.slice("/link?url=".length, link.indexOf("&sa="));
 		});
 
 	// remove duplicate links and map links to the correct object shape
