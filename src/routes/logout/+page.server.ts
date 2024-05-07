@@ -11,8 +11,8 @@ export const actions = {
 		cookies.delete(COOKIE_NAME, {
 			path: "/",
 			// So that it works inside the space's iframe
-			sameSite: dev ? "lax" : "none",
-			secure: !dev,
+			sameSite: "lax",
+			secure: false,
 			httpOnly: true,
 		});
 		throw redirect(303, `${base}/`);
