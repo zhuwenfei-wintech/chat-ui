@@ -2,7 +2,7 @@
 	import { enhance } from "$app/forms";
 	import { base } from "$app/paths";
 	import { page } from "$app/stores";
-	import { PUBLIC_ORIGIN, PUBLIC_SHARE_PREFIX } from "$env/static/public";
+	import { env as envPublic } from "$env/dynamic/public";
 	import { useSettingsStore } from "$lib/stores/settings";
 	import type { PageData } from "./$types";
 
@@ -23,7 +23,8 @@
 
 	$: isActive = $settings.activeModel === $page.params.assistantId;
 
-	const prefix = PUBLIC_SHARE_PREFIX || `${PUBLIC_ORIGIN || $page.url.origin}${base}`;
+	const prefix =
+		envPublic.PUBLIC_SHARE_PREFIX || `${envPublic.PUBLIC_ORIGIN || $page.url.origin}${base}`;
 
 	$: shareUrl = `${prefix}/assistant/${assistant?._id}`;
 
@@ -139,6 +140,20 @@
 						<button type="button" disabled class="text-gray-700">
 							<CarbonFlag class="mr-1.5 inline text-xs" />Reported</button
 						>
+					{/if}
+				{/if}
+				{#if data?.user?.isAdmin}
+					<form method="POST" action="?/delete" use:enhance>
+						<button type="submit" class="flex items-center text-red-600 underline">
+							<CarbonTrash class="mr-1.5 inline text-xs" />Delete</button
+						>
+					</form>
+					{#if assistant?.featured}
+						<form method="POST" action="?/unfeature" use:enhance>
+							<button type="submit" class="flex items-center text-red-600 underline">
+								<CarbonTrash class="mr-1.5 inline text-xs" />Un-feature</button
+							>
+						</form>
 					{/if}
 				{/if}
 			</div>

@@ -1,16 +1,9 @@
-import {
-	HF_TOKEN,
-	HF_API_ROOT,
-	MODELS,
-	OLD_MODELS,
-	TASK_MODEL,
-	HF_ACCESS_TOKEN,
-} from "$env/static/private";
+import { env } from "$env/dynamic/private";
 import type { ChatTemplateInput } from "$lib/types/Template";
 import { compileTemplate } from "$lib/utils/template";
 import { z } from "zod";
 import endpoints, { endpointSchema, type Endpoint } from "./endpoints/endpoints";
-import endpointTgi from "./endpoints/tgi/endpointTgi";
+import { endpointTgi } from "./endpoints/tgi/endpointTgi";
 import { sum } from "$lib/utils/sum";
 import { embeddingModels, validateEmbeddingModelByName } from "./embeddingModels";
 
@@ -18,6 +11,8 @@ import type { PreTrainedTokenizer } from "@xenova/transformers";
 
 import JSON5 from "json5";
 import { getTokenizer } from "$lib/utils/getTokenizer";
+import { logger } from "$lib/server/logger";
+import { ToolResultStatus } from "$lib/types/Tool";
 
 type Optional<T, K extends keyof T> = Pick<Partial<T>, K> & Omit<T, K>;
 
@@ -67,11 +62,12 @@ const modelConfig = z.object({
 		.passthrough()
 		.optional(),
 	multimodal: z.boolean().default(false),
+	tools: z.boolean().default(false),
 	unlisted: z.boolean().default(false),
 	embeddingModel: validateEmbeddingModelByName(embeddingModels).optional(),
 });
 
-const modelsRaw = z.array(modelConfig).parse(JSON5.parse(MODELS));
+const modelsRaw = z.array(modelConfig).parse(JSON5.parse(env.MODELS));
 
 async function getChatPromptRender(
 	m: z.infer<typeof modelConfig>
@@ -91,16 +87,14 @@ async function getChatPromptRender(
 	try {
 		tokenizer = await getTokenizer(m.tokenizer);
 	} catch (e) {
-		console.error(
-			"Failed to load tokenizer for model " +
-				m.name +
-				" consider setting chatPromptTemplate manually or making sure the model is available on the hub. Error: " +
-				(e as Error).message
+		logger.error(
+			e,
+			`Failed to load tokenizer for model ${m.name} consider setting chatPromptTemplate manually or making sure the model is available on the hub.`
 		);
 		process.exit();
 	}
 
-	const renderTemplate = ({ messages, preprompt }: ChatTemplateInput) => {
+	const renderTemplate = ({ messages, preprompt, tools, toolResults }: ChatTemplateInput) => {
 		let formattedMessages: { role: string; content: string }[] = messages.map((message) => ({
 			content: message.content,
 			role: message.from,
@@ -116,9 +110,64 @@ async function getChatPromptRender(
 			];
 		}
 
+		if (toolResults?.length) {
+			// todo: should update the command r+ tokenizer to support system messages at any location
+			// or use the `rag` mode without the citations
+			formattedMessages = [
+				{
+					role: "system",
+					content:
+						"\n\n<results>\n" +
+						toolResults
+							.flatMap((result, idx) => {
+								if (result.status === ToolResultStatus.Error) {
+									return (
+										`Document: ${idx}\n` + `Tool "${result.call.name}" error\n` + result.message
+									);
+								}
+								return (
+									`Document: ${idx}\n` +
+									result.outputs
+										.flatMap((output) =>
+											Object.entries(output).map(([title, text]) => `${title}\n${text}`)
+										)
+										.join("\n")
+								);
+							})
+							.join("\n\n") +
+						"\n</results>",
+				},
+				...formattedMessages,
+			];
+			tools = [];
+		}
+
+		const chatTemplate = tools?.length ? "tool_use" : undefined;
+
+		const documents = (toolResults ?? []).flatMap((result) => {
+			if (result.status === ToolResultStatus.Error) {
+				return [{ title: `Tool "${result.call.name}" error`, text: "\n" + result.message }];
+			}
+			return result.outputs.flatMap((output) =>
+				Object.entries(output).map(([title, text]) => ({
+					title: `Tool "${result.call.name}" ${title}`,
+					text: "\n" + text,
+				}))
+			);
+		});
+
 		const output = tokenizer.apply_chat_template(formattedMessages, {
 			tokenize: false,
 			add_generation_prompt: true,
+			chat_template: chatTemplate,
+			// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+			// @ts-ignore
+			tools:
+				tools?.map(({ parameterDefinitions, ...tool }) => ({
+					parameter_definitions: parameterDefinitions,
+					...tool,
+				})) ?? [],
+			documents,
 		});
 
 		if (typeof output !== "string") {
@@ -140,14 +189,18 @@ const processModel = async (m: z.infer<typeof modelConfig>) => ({
 	parameters: { ...m.parameters, stop_sequences: m.parameters?.stop },
 });
 
+export type ProcessedModel = Awaited<ReturnType<typeof processModel>> & {
+	getEndpoint: () => Promise<Endpoint>;
+};
+
 const addEndpoint = (m: Awaited<ReturnType<typeof processModel>>) => ({
 	...m,
 	getEndpoint: async (): Promise<Endpoint> => {
 		if (!m.endpoints) {
 			return endpointTgi({
 				type: "tgi",
-				url: `${HF_API_ROOT}/${m.name}`,
-				accessToken: HF_TOKEN ?? HF_ACCESS_TOKEN,
+				url: `${env.HF_API_ROOT}/${m.name}`,
+				accessToken: env.HF_TOKEN ?? env.HF_ACCESS_TOKEN,
 				weight: 1,
 				model: m,
 			});
@@ -165,6 +218,8 @@ const addEndpoint = (m: Awaited<ReturnType<typeof processModel>>) => ({
 						return endpoints.tgi(args);
 					case "anthropic":
 						return endpoints.anthropic(args);
+					case "anthropic-vertex":
+						return endpoints.anthropicvertex(args);
 					case "aws":
 						return await endpoints.aws(args);
 					case "openai":
@@ -193,12 +248,14 @@ const addEndpoint = (m: Awaited<ReturnType<typeof processModel>>) => ({
 	},
 });
 
-export const models = await Promise.all(modelsRaw.map((e) => processModel(e).then(addEndpoint)));
+export const models: ProcessedModel[] = await Promise.all(
+	modelsRaw.map((e) => processModel(e).then(addEndpoint))
+);
 
 export const defaultModel = models[0];
 
 // Models that have been deprecated
-export const oldModels = OLD_MODELS
+export const oldModels = env.OLD_MODELS
 	? z
 			.array(
 				z.object({
@@ -207,7 +264,7 @@ export const oldModels = OLD_MODELS
 					displayName: z.string().min(1).optional(),
 				})
 			)
-			.parse(JSON5.parse(OLD_MODELS))
+			.parse(JSON5.parse(env.OLD_MODELS))
 			.map((m) => ({ ...m, id: m.id || m.name, displayName: m.displayName || m.name }))
 	: [];
 
@@ -218,9 +275,9 @@ export const validateModel = (_models: BackendModel[]) => {
 
 // if `TASK_MODEL` is string & name of a model in `MODELS`, then we use `MODELS[TASK_MODEL]`, else we try to parse `TASK_MODEL` as a model config itself
 
-export const smallModel = TASK_MODEL
-	? (models.find((m) => m.name === TASK_MODEL) ||
-			(await processModel(modelConfig.parse(JSON5.parse(TASK_MODEL))).then((m) =>
+export const smallModel = env.TASK_MODEL
+	? (models.find((m) => m.name === env.TASK_MODEL) ||
+			(await processModel(modelConfig.parse(JSON5.parse(env.TASK_MODEL))).then((m) =>
 				addEndpoint(m)
 			))) ??
 	  defaultModel
@@ -228,5 +285,5 @@ export const smallModel = TASK_MODEL
 
 export type BackendModel = Optional<
 	typeof defaultModel,
-	"preprompt" | "parameters" | "multimodal" | "unlisted"
+	"preprompt" | "parameters" | "multimodal" | "unlisted" | "tools"
 >;

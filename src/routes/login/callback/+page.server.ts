@@ -3,14 +3,14 @@ import { getOIDCUserData, validateAndParseCsrfToken } from "$lib/server/auth";
 import { z } from "zod";
 import { base } from "$app/paths";
 import { updateUser } from "./updateUser";
-import { ALLOWED_USER_EMAILS } from "$env/static/private";
+import { env } from "$env/dynamic/private";
 import JSON5 from "json5";
 
 const allowedUserEmails = z
 	.array(z.string().email())
 	.optional()
 	.default([])
-	.parse(JSON5.parse(ALLOWED_USER_EMAILS));
+	.parse(JSON5.parse(env.ALLOWED_USER_EMAILS));
 
 export async function load({ url, locals, cookies, request, getClientAddress }) {
 	const { error: errorName, error_description: errorDescription } = z
@@ -24,10 +24,11 @@ export async function load({ url, locals, cookies, request, getClientAddress }) 
 		throw error(400, errorName + (errorDescription ? ": " + errorDescription : ""));
 	}
 
-	const { code, state } = z
+	const { code, state, iss } = z
 		.object({
 			code: z.string(),
 			state: z.string(),
+			iss: z.string().optional(),
 		})
 		.parse(Object.fromEntries(url.searchParams.entries()));
 
@@ -39,7 +40,11 @@ export async function load({ url, locals, cookies, request, getClientAddress }) 
 		throw error(403, "Invalid or expired CSRF token");
 	}
 
-	const { userData } = await getOIDCUserData({ redirectURI: validatedToken.redirectUrl }, code);
+	const { userData } = await getOIDCUserData(
+		{ redirectURI: validatedToken.redirectUrl },
+		code,
+		iss
+	);
 
 	// Filter by allowed user emails
 	if (allowedUserEmails.length > 0) {

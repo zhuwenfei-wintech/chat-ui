@@ -1,14 +1,15 @@
 import { z } from "zod";
 import type { Endpoint } from "../endpoints";
 import type { TextGenerationStreamOutput } from "@huggingface/inference";
-import { CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN } from "$env/static/private";
+import { env } from "$env/dynamic/private";
+import { logger } from "$lib/server/logger";
 
 export const endpointCloudflareParametersSchema = z.object({
 	weight: z.number().int().positive().default(1),
 	model: z.any(),
 	type: z.literal("cloudflare"),
-	accountId: z.string().default(CLOUDFLARE_ACCOUNT_ID),
-	apiToken: z.string().default(CLOUDFLARE_API_TOKEN),
+	accountId: z.string().default(env.CLOUDFLARE_ACCOUNT_ID),
+	apiToken: z.string().default(env.CLOUDFLARE_API_TOKEN),
 });
 
 export async function endpointCloudflare(
@@ -17,7 +18,7 @@ export async function endpointCloudflare(
 	const { accountId, apiToken, model } = endpointCloudflareParametersSchema.parse(input);
 	const apiURL = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@hf/${model.id}`;
 
-	return async ({ messages, preprompt }) => {
+	return async ({ messages, preprompt, generateSettings }) => {
 		let messagesFormatted = messages.map((message) => ({
 			role: message.from,
 			content: message.content,
@@ -27,9 +28,16 @@ export async function endpointCloudflare(
 			messagesFormatted = [{ role: "system", content: preprompt ?? "" }, ...messagesFormatted];
 		}
 
+		const parameters = { ...model.parameters, ...generateSettings };
+
 		const payload = JSON.stringify({
 			messages: messagesFormatted,
 			stream: true,
+			max_tokens: parameters?.max_new_tokens,
+			temperature: parameters?.temperature,
+			top_p: parameters?.top_p,
+			top_k: parameters?.top_k,
+			repetition_penalty: parameters?.repetition_penalty,
 		});
 
 		const res = await fetch(apiURL, {
@@ -104,8 +112,8 @@ export async function endpointCloudflare(
 						try {
 							data = JSON.parse(jsonString);
 						} catch (e) {
-							console.error("Failed to parse JSON", e);
-							console.error("Problematic JSON string:", jsonString);
+							logger.error(e, "Failed to parse JSON");
+							logger.error(jsonString, "Problematic JSON string:");
 							continue; // Skip this iteration and try the next chunk
 						}
 

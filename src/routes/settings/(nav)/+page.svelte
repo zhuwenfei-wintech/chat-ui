@@ -9,7 +9,7 @@
 
 	import { useSettingsStore } from "$lib/stores/settings";
 	import Switch from "$lib/components/Switch.svelte";
-	import { PUBLIC_APP_DATA_SHARING } from "$env/static/public";
+	import { env as envPublic } from "$env/dynamic/public";
 
 	let isConfirmingDeletion = false;
 
@@ -22,7 +22,7 @@
 	</div>
 
 	<div class="flex h-full flex-col gap-4 pt-4 max-sm:pt-0">
-		{#if PUBLIC_APP_DATA_SHARING === "1"}
+		{#if envPublic.PUBLIC_APP_DATA_SHARING === "1"}
 			<!-- svelte-ignore a11y-label-has-associated-control -->
 			<label class="flex items-center">
 				<Switch
@@ -43,6 +43,14 @@
 			<Switch name="hideEmojiOnSidebar" bind:checked={$settings.hideEmojiOnSidebar} />
 			<div class="inline cursor-pointer select-none items-center gap-2 pl-2">
 				Hide emoticons in conversation topics
+			</div>
+		</label>
+
+		<!-- svelte-ignore a11y-label-has-associated-control -->
+		<label class="mt-6 flex items-center">
+			<Switch name="disableStream" bind:checked={$settings.disableStream} />
+			<div class="inline cursor-pointer select-none items-center gap-2 pl-2">
+				Disable streaming tokens
 			</div>
 		</label>
 

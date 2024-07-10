@@ -1,4 +1,45 @@
-import type { MessageUpdate, TextStreamUpdate } from "$lib/types/MessageUpdate";
+import type { MessageFile } from "$lib/types/Message";
+import {
+	type MessageUpdate,
+	type MessageStreamUpdate,
+	type MessageToolCallUpdate,
+	MessageToolUpdateType,
+	MessageUpdateType,
+	type MessageToolUpdate,
+	type MessageWebSearchUpdate,
+	type MessageWebSearchGeneralUpdate,
+	type MessageWebSearchSourcesUpdate,
+	type MessageWebSearchErrorUpdate,
+	MessageWebSearchUpdateType,
+	type MessageToolErrorUpdate,
+	type MessageToolResultUpdate,
+} from "$lib/types/MessageUpdate";
+
+export const isMessageWebSearchUpdate = (update: MessageUpdate): update is MessageWebSearchUpdate =>
+	update.type === MessageUpdateType.WebSearch;
+export const isMessageWebSearchGeneralUpdate = (
+	update: MessageUpdate
+): update is MessageWebSearchGeneralUpdate =>
+	isMessageWebSearchUpdate(update) && update.subtype === MessageWebSearchUpdateType.Update;
+export const isMessageWebSearchSourcesUpdate = (
+	update: MessageUpdate
+): update is MessageWebSearchSourcesUpdate =>
+	isMessageWebSearchUpdate(update) && update.subtype === MessageWebSearchUpdateType.Sources;
+export const isMessageWebSearchErrorUpdate = (
+	update: MessageUpdate
+): update is MessageWebSearchErrorUpdate =>
+	isMessageWebSearchUpdate(update) && update.subtype === MessageWebSearchUpdateType.Error;
+
+export const isMessageToolUpdate = (update: MessageUpdate): update is MessageToolUpdate =>
+	update.type === MessageUpdateType.Tool;
+export const isMessageToolCallUpdate = (update: MessageUpdate): update is MessageToolCallUpdate =>
+	isMessageToolUpdate(update) && update.subtype === MessageToolUpdateType.Call;
+export const isMessageToolResultUpdate = (
+	update: MessageUpdate
+): update is MessageToolResultUpdate =>
+	isMessageToolUpdate(update) && update.subtype === MessageToolUpdateType.Result;
+export const isMessageToolErrorUpdate = (update: MessageUpdate): update is MessageToolErrorUpdate =>
+	isMessageToolUpdate(update) && update.subtype === MessageToolUpdateType.Error;
 
 type MessageUpdateRequestOptions = {
 	base: string;
@@ -7,7 +48,8 @@ type MessageUpdateRequestOptions = {
 	isRetry: boolean;
 	isContinue: boolean;
 	webSearch: boolean;
-	files?: string[];
+	tools?: Record<string, boolean>;
+	files?: MessageFile[];
 };
 export async function fetchMessageUpdates(
 	conversationId: string,
@@ -17,17 +59,28 @@ export async function fetchMessageUpdates(
 	const abortController = new AbortController();
 	abortSignal.addEventListener("abort", () => abortController.abort());
 
+	const form = new FormData();
+
+	const optsJSON = JSON.stringify({
+		inputs: opts.inputs,
+		id: opts.messageId,
+		is_retry: opts.isRetry,
+		is_continue: opts.isContinue,
+		web_search: opts.webSearch,
+		tools: opts.tools,
+	});
+
+	opts.files?.forEach((file) => {
+		const name = file.type + ";" + file.name;
+
+		form.append("files", new File([file.value], name, { type: file.mime }));
+	});
+
+	form.append("data", optsJSON);
+
 	const response = await fetch(`${opts.base}/conversation/${conversationId}`, {
 		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			inputs: opts.inputs,
-			id: opts.messageId,
-			is_retry: opts.isRetry,
-			is_continue: opts.isContinue,
-			web_search: opts.webSearch,
-			files: opts.files,
-		}),
+		body: form,
 		signal: abortController.signal,
 	});
 
@@ -107,7 +160,7 @@ function parseMessageUpdates(value: string): {
 async function* streamMessageUpdatesToFullWords(
 	iterator: AsyncGenerator<MessageUpdate>
 ): AsyncGenerator<MessageUpdate> {
-	let bufferedStreamUpdates: TextStreamUpdate[] = [];
+	let bufferedStreamUpdates: MessageStreamUpdate[] = [];
 
 	const endAlphanumeric = /[a-zA-Z0-9À-ž'`]+$/;
 	const beginnningAlphanumeric = /^[a-zA-Z0-9À-ž'`]+/;
@@ -129,7 +182,7 @@ async function* streamMessageUpdatesToFullWords(
 
 			// Combine tokens together and emit
 			yield {
-				type: "stream",
+				type: MessageUpdateType.Stream,
 				token: bufferedStreamUpdates
 					.slice(lastIndexEmitted, i)
 					.map((_) => _.token)

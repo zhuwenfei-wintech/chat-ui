@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { marked, type MarkedOptions } from "marked";
 	import markedKatex from "marked-katex-extension";
-	import type { Message } from "$lib/types/Message";
+	import type { Message, MessageFile } from "$lib/types/Message";
 	import { afterUpdate, createEventDispatcher, tick } from "svelte";
 	import { deepestChild } from "$lib/utils/deepestChild";
 	import { page } from "$app/stores";
@@ -10,20 +10,29 @@
 	import CopyToClipBoardBtn from "../CopyToClipBoardBtn.svelte";
 	import IconLoading from "../icons/IconLoading.svelte";
 	import CarbonRotate360 from "~icons/carbon/rotate-360";
+	import CarbonTrashCan from "~icons/carbon/trash-can";
 	import CarbonDownload from "~icons/carbon/download";
 	import CarbonThumbsUp from "~icons/carbon/thumbs-up";
 	import CarbonThumbsDown from "~icons/carbon/thumbs-down";
 	import CarbonPen from "~icons/carbon/pen";
 	import CarbonChevronLeft from "~icons/carbon/chevron-left";
 	import CarbonChevronRight from "~icons/carbon/chevron-right";
-
 	import { PUBLIC_SEP_TOKEN } from "$lib/constants/publicSepToken";
 	import type { Model } from "$lib/types/Model";
+	import UploadedFile from "./UploadedFile.svelte";
 
 	import OpenWebSearchResults from "../OpenWebSearchResults.svelte";
-	import type { WebSearchUpdate } from "$lib/types/MessageUpdate";
+	import {
+		MessageWebSearchUpdateType,
+		type MessageToolUpdate,
+		type MessageWebSearchSourcesUpdate,
+		type MessageWebSearchUpdate,
+	} from "$lib/types/MessageUpdate";
 	import { base } from "$app/paths";
 	import { useConvTreeStore } from "$lib/stores/convTree";
+	import Modal from "../Modal.svelte";
+	import ToolUpdate from "./ToolUpdate.svelte";
+	import { useSettingsStore } from "$lib/stores/settings";
 
 	function sanitizeMd(md: string) {
 		let ret = md
@@ -58,6 +67,8 @@
 
 	$: message = messages.find((m) => m.id === id) ?? ({} as Message);
 
+	$: urlNotTrailing = $page.url.pathname.replace(/\/$/, "");
+
 	const dispatch = createEventDispatcher<{
 		retry: { content?: string; id: Message["id"] };
 		vote: { score: Message["score"]; id: Message["id"] };
@@ -69,7 +80,6 @@
 	let isCopied = false;
 
 	let initialized = false;
-
 	const renderer = new marked.Renderer();
 	// For code blocks with simple backticks
 	renderer.codespan = (code) => {
@@ -105,7 +115,13 @@
 	$: emptyLoad =
 		!message.content && (webSearchIsDone || (searchUpdates && searchUpdates.length === 0));
 
+	const settings = useSettingsStore();
+
 	afterUpdate(() => {
+		if ($settings.disableStream) {
+			return;
+		}
+
 		loadingEl?.$destroy();
 		clearTimeout(pendingTimeout);
 
@@ -129,19 +145,33 @@
 	}
 
 	$: searchUpdates = (message.updates?.filter(({ type }) => type === "webSearch") ??
-		[]) as WebSearchUpdate[];
+		[]) as MessageWebSearchUpdate[];
 
-	$: downloadLink =
-		message.from === "user" ? `${$page.url.pathname}/message/${message.id}/prompt` : undefined;
+	// filter all updates with type === "tool" then group them by uuid field
+
+	$: toolUpdates = message.updates
+		?.filter(({ type }) => type === "tool")
+		.reduce((acc, update) => {
+			if (update.type !== "tool") {
+				return acc;
+			}
+			acc[update.uuid] = acc[update.uuid] ?? [];
+			acc[update.uuid].push(update);
+			return acc;
+		}, {} as Record<string, MessageToolUpdate[]>);
+
+	$: downloadLink = urlNotTrailing + `/message/${message.id}/prompt`;
 
 	let webSearchIsDone = true;
 
-	$: webSearchIsDone =
-		searchUpdates.length > 0 && searchUpdates[searchUpdates.length - 1].messageType === "sources";
+	$: webSearchIsDone = searchUpdates.some(
+		(update) => update.subtype === MessageWebSearchUpdateType.Finished
+	);
 
-	$: webSearchSources =
-		searchUpdates &&
-		searchUpdates?.filter(({ messageType }) => messageType === "sources")?.[0]?.sources;
+	$: webSearchSources = searchUpdates?.find(
+		(update): update is MessageWebSearchSourcesUpdate =>
+			update.subtype === MessageWebSearchUpdateType.Sources
+	)?.sources;
 
 	$: if (isCopied) {
 		setTimeout(() => {
@@ -177,7 +207,29 @@
 	const convTreeStore = useConvTreeStore();
 
 	$: if (message.children?.length === 0) $convTreeStore.leaf = message.id;
+
+	$: modalImageToShow = null as MessageFile | null;
 </script>
+
+{#if modalImageToShow}
+	<!-- show the image file full screen, click outside to exit -->
+	<Modal width="sm:max-w-[500px]" on:close={() => (modalImageToShow = null)}>
+		{#if modalImageToShow.type === "hash"}
+			<img
+				src={urlNotTrailing + "/output/" + modalImageToShow.value}
+				alt="input from user"
+				class="aspect-auto"
+			/>
+		{:else}
+			<!-- handle the case where this is a base64 encoded image -->
+			<img
+				src={`data:${modalImageToShow.mime};base64,${modalImageToShow.value}`}
+				alt="input from user"
+				class="aspect-auto"
+			/>
+		{/if}
+	</Modal>
+{/if}
 
 {#if message.from === "assistant"}
 	<div
@@ -202,6 +254,29 @@
 		<div
 			class="relative min-h-[calc(2rem+theme(spacing[3.5])*2)] min-w-[60px] break-words rounded-2xl border border-gray-100 bg-gradient-to-br from-gray-50 px-5 py-3.5 text-gray-600 prose-pre:my-2 dark:border-gray-800 dark:from-gray-800/40 dark:text-gray-300"
 		>
+			{#if message.files?.length}
+				<div class="flex h-fit flex-wrap gap-x-5 gap-y-2">
+					{#each message.files as file}
+						<!-- handle the case where this is a hash that points to an image in the db, hash is always 64 char long -->
+						<button on:click={() => (modalImageToShow = file)}>
+							{#if file.type === "hash"}
+								<img
+									src={urlNotTrailing + "/output/" + file.value}
+									alt="output from assistant"
+									class="my-2 aspect-auto max-h-48 cursor-pointer rounded-lg shadow-lg xl:max-h-56"
+								/>
+							{:else}
+								<!-- handle the case where this is a base64 encoded image -->
+								<img
+									src={`data:${file.mime};base64,${file.value}`}
+									alt="output from assistant"
+									class="my-2 aspect-auto max-h-48 cursor-pointer rounded-lg shadow-lg xl:max-h-56"
+								/>
+							{/if}
+						</button>
+					{/each}
+				</div>
+			{/if}
 			{#if searchUpdates && searchUpdates.length > 0}
 				<OpenWebSearchResults
 					classNames={tokens.length ? "mb-3.5" : ""}
@@ -209,10 +284,21 @@
 				/>
 			{/if}
 
+			{#if toolUpdates}
+				{#each Object.values(toolUpdates) as tool}
+					{#if tool.length}
+						<ToolUpdate {tool} {loading} />
+					{/if}
+				{/each}
+			{/if}
+
 			<div
 				class="prose max-w-none max-sm:prose-sm dark:prose-invert prose-headings:font-semibold prose-h1:text-lg prose-h2:text-base prose-h3:text-base prose-pre:bg-gray-800 dark:prose-pre:bg-gray-900"
 				bind:this={contentEl}
 			>
+				{#if isLast && loading && $settings.disableStream}
+					<IconLoading classNames="loading inline ml-2 first:ml-0" />
+				{/if}
 				{#each tokens as token}
 					{#if token.type === "code"}
 						<CodeBlock lang={token.lang} code={unsanitizeMd(token.text)} />
@@ -227,7 +313,7 @@
 			{#if webSearchSources?.length}
 				<div class="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-sm">
 					<div class="text-gray-400">Sources:</div>
-					{#each webSearchSources as { link, title, hostname }}
+					{#each webSearchSources as { link, title }}
 						<a
 							class="flex items-center gap-2 whitespace-nowrap rounded-lg border bg-white px-2 py-1.5 leading-none hover:border-gray-300 dark:border-gray-800 dark:bg-gray-900 dark:hover:border-gray-700"
 							href={link}
@@ -235,16 +321,16 @@
 						>
 							<img
 								class="h-3.5 w-3.5 rounded"
-								src="https://www.google.com/s2/favicons?sz=64&domain_url={hostname}"
+								src="https://www.google.com/s2/favicons?sz=64&domain_url={new URL(link).hostname}"
 								alt="{title} favicon"
 							/>
-							<div>{hostname.replace(/^www\./, "")}</div>
+							<div>{new URL(link).hostname.replace(/^www\./, "")}</div>
 						</a>
 					{/each}
 				</div>
 			{/if}
 		</div>
-		{#if !loading && message.content}
+		{#if !loading && (message.content || toolUpdates)}
 			<div
 				class="absolute bottom-1 right-0 -mb-4 flex max-md:transition-all md:bottom-0 md:group-hover:visible md:group-hover:opacity-100
 		{message.score ? 'visible opacity-100' : 'invisible max-md:-translate-y-4 max-md:opacity-0'}
@@ -304,24 +390,16 @@
 		on:click={() => (isTapped = !isTapped)}
 		on:keydown={() => (isTapped = !isTapped)}
 	>
-		<div class="flex w-full flex-col">
-			{#if message.files && message.files.length > 0}
-				<div class="mx-auto grid w-fit grid-cols-2 gap-5 px-5">
+		<div class="flex w-full flex-col gap-2">
+			{#if message.files?.length}
+				<div class="flex w-fit gap-4 px-5">
 					{#each message.files as file}
-						<!-- handle the case where this is a hash that points to an image in the db, hash is always 64 char long -->
-						{#if file.length === 64}
-							<img
-								src={$page.url.pathname + "/output/" + file}
-								alt="input from user"
-								class="my-2 aspect-auto max-h-48 rounded-lg shadow-lg"
-							/>
+						{#if file.mime.startsWith("image/")}
+							<button on:click={() => (modalImageToShow = file)}>
+								<UploadedFile {file} canClose={false} />
+							</button>
 						{:else}
-							<!-- handle the case where this is a base64 encoded image -->
-							<img
-								src={"data:image/*;base64," + file}
-								alt="input from user"
-								class="my-2 aspect-auto max-h-48 rounded-lg shadow-lg"
-							/>
+							<UploadedFile {file} canClose={false} />
 						{/if}
 					{/each}
 				</div>
@@ -344,7 +422,8 @@
 						}}
 					>
 						<textarea
-							class="w-full whitespace-break-spaces break-words rounded-lg bg-gray-100 px-5 py-3.5 text-gray-500 *:h-max dark:bg-gray-800 dark:text-gray-400"
+							class="w-full whitespace-break-spaces break-words rounded-xl bg-gray-100 px-5 py-3.5 text-gray-500 *:h-max dark:bg-gray-800 dark:text-gray-400"
+							rows="5"
 							bind:this={editContentEl}
 							value={message.content.trim()}
 							on:keydown={handleKeyDown}
@@ -429,7 +508,7 @@
 		<svelte:fragment slot="childrenNav">
 			{#if nChildren > 1 && $convTreeStore.editing === null}
 				<div
-					class="font-white z-10 -mt-1 ml-3.5 mr-auto flex h-6 w-fit select-none flex-row items-center justify-center gap-1 text-sm"
+					class="font-white group/navbranch z-10 -mt-1 ml-3.5 mr-auto flex h-6 w-fit select-none flex-row items-center justify-center gap-1 text-sm"
 				>
 					<button
 						class="inline text-lg font-thin text-gray-400 disabled:pointer-events-none disabled:opacity-25 hover:text-gray-800 dark:text-gray-500 dark:hover:text-gray-200"
@@ -452,8 +531,29 @@
 					>
 						<CarbonChevronRight class="text-sm" />
 					</button>
+					{#if !loading && message.children}<form
+							method="POST"
+							action="?/deleteBranch"
+							class="hidden group-hover/navbranch:block"
+						>
+							<input name="messageId" value={message.children[childrenToRender]} type="hidden" />
+							<button
+								class="flex items-center justify-center text-xs text-gray-400 hover:text-gray-800 dark:text-gray-500 dark:hover:text-gray-200"
+								type="submit"
+								><CarbonTrashCan />
+							</button>
+						</form>
+					{/if}
 				</div>
 			{/if}
 		</svelte:fragment>
 	</svelte:self>
 {/if}
+
+<style>
+	@keyframes loading {
+		to {
+			stroke-dashoffset: 122.9;
+		}
+	}
+</style>
