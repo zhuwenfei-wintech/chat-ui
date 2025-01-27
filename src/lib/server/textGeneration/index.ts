@@ -8,7 +8,7 @@ import {
 	getAssistantById,
 	processPreprompt,
 } from "./assistant";
-import { pickTools, runTools } from "./tools";
+import { getTools, runTools } from "./tools";
 import type { WebSearch } from "$lib/types/WebSearch";
 import {
 	type MessageUpdate,
@@ -22,15 +22,31 @@ import type { ToolResult } from "$lib/types/Tool";
 import { toolHasName } from "../tools/utils";
 import directlyAnswer from "../tools/directlyAnswer";
 
+async function* keepAlive(done: AbortSignal): AsyncGenerator<MessageUpdate, undefined, undefined> {
+	while (!done.aborted) {
+		yield {
+			type: MessageUpdateType.Status,
+			status: MessageUpdateStatus.KeepAlive,
+		};
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+}
+
 export async function* textGeneration(ctx: TextGenerationContext) {
-	yield* mergeAsyncGenerators([
-		textGenerationWithoutTitle(ctx),
-		generateTitleForConversation(ctx.conv),
-	]);
+	const done = new AbortController();
+
+	const titleGen = generateTitleForConversation(ctx.conv);
+	const textGen = textGenerationWithoutTitle(ctx, done);
+	const keepAliveGen = keepAlive(done.signal);
+
+	// keep alive until textGen is done
+
+	yield* mergeAsyncGenerators([titleGen, textGen, keepAliveGen]);
 }
 
 async function* textGenerationWithoutTitle(
-	ctx: TextGenerationContext
+	ctx: TextGenerationContext,
+	done: AbortController
 ): AsyncGenerator<MessageUpdate, undefined, undefined> {
 	yield {
 		type: MessageUpdateType.Status,
@@ -47,27 +63,27 @@ async function* textGenerationWithoutTitle(
 	// - it's not continuing a previous message
 	// - AND the model doesn't support tools and websearch is selected
 	// - OR the assistant has websearch enabled (no tools for assistants for now)
-	if (
-		!isContinue &&
-		((!model.tools && webSearch && !conv.assistantId) || assistantHasWebSearch(assistant))
-	) {
+	if (!isContinue && ((webSearch && !conv.assistantId) || assistantHasWebSearch(assistant))) {
 		webSearchResult = yield* runWebSearch(conv, messages, assistant?.rag);
 	}
 
 	let preprompt = conv.preprompt;
 	if (assistantHasDynamicPrompt(assistant) && preprompt) {
-		preprompt = await processPreprompt(preprompt);
+		preprompt = await processPreprompt(preprompt, messages.at(-1)?.content);
 		if (messages[0].from === "system") messages[0].content = preprompt;
 	}
 
 	let toolResults: ToolResult[] = [];
+	let tools = model.tools ? await getTools(toolsPreference, ctx.assistant) : undefined;
 
-	if (model.tools && !conv.assistantId) {
-		const tools = pickTools(toolsPreference, Boolean(assistant));
+	if (tools) {
 		const toolCallsRequired = tools.some((tool) => !toolHasName(directlyAnswer.name, tool));
-		if (toolCallsRequired) toolResults = yield* runTools(ctx, tools, preprompt);
+		if (toolCallsRequired) {
+			toolResults = yield* runTools(ctx, tools, preprompt);
+		} else tools = undefined;
 	}
 
 	const processedMessages = await preprocessMessages(messages, webSearchResult, convId);
 	yield* generate({ ...ctx, messages: processedMessages }, toolResults, preprompt);
+	done.abort();
 }

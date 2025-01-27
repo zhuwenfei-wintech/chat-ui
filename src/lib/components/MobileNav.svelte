@@ -31,7 +31,7 @@
 </script>
 
 <nav
-	class="flex h-12 items-center justify-between border-b bg-gray-50 px-3 md:hidden dark:border-gray-800 dark:bg-gray-800/70"
+	class="flex h-12 items-center justify-between border-b bg-gray-50 px-3 dark:border-gray-800 dark:bg-gray-800/70 md:hidden"
 >
 	<button
 		type="button"
@@ -40,7 +40,11 @@
 		aria-label="Open menu"
 		bind:this={openEl}><CarbonTextAlignJustify /></button
 	>
-	<span class="truncate px-4">{title}</span>
+	{#await title}
+		<div class="flex h-full items-center justify-center" />
+	{:then title}
+		<span class="truncate px-4">{title ?? ""}</span>
+	{/await}
 	<a
 		class:invisible={!$page.params.id}
 		href="{base}/"

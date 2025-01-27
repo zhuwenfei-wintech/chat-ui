@@ -11,16 +11,19 @@ import { env } from "$env/dynamic/private";
 import { logger } from "$lib/server/logger";
 import { onExit } from "$lib/server/exitHandler";
 
-const blocker = await PlaywrightBlocker.fromPrebuiltAdsAndTracking(fetch)
-	.then((blker) => {
-		const mostBlocked = blker.blockFonts().blockMedias().blockFrames().blockImages();
-		if (env.WEBSEARCH_JAVASCRIPT === "false") return mostBlocked.blockScripts();
-		return mostBlocked;
-	})
-	.catch((err) => {
-		logger.error(err, "Failed to initialize PlaywrightBlocker from prebuilt lists");
-		return PlaywrightBlocker.empty();
-	});
+const blocker =
+	env.PLAYWRIGHT_ADBLOCKER === "true"
+		? await PlaywrightBlocker.fromPrebuiltAdsAndTracking(fetch)
+				.then((blker) => {
+					const mostBlocked = blker.blockFonts().blockMedias().blockFrames().blockImages();
+					if (env.WEBSEARCH_JAVASCRIPT === "false") return mostBlocked.blockScripts();
+					return mostBlocked;
+				})
+				.catch((err) => {
+					logger.error(err, "Failed to initialize PlaywrightBlocker from prebuilt lists");
+					return PlaywrightBlocker.empty();
+				})
+		: PlaywrightBlocker.empty();
 
 let browserSingleton: Promise<Browser> | undefined;
 async function getBrowser() {
@@ -65,15 +68,29 @@ export async function withPage<T>(
 
 	try {
 		const page = await ctx.newPage();
-		process.env.PLAYWRIGHT_ADBLOCKER === "true" && (await blocker.enableBlockingInPage(page));
+		if (env.PLAYWRIGHT_ADBLOCKER === "true") {
+			await blocker.enableBlockingInPage(page);
+		}
 
-		const res = await page.goto(url, { waitUntil: "load", timeout: 3500 }).catch(() => {
-			console.warn(`Failed to load page within 2s: ${url}`);
+		await page.route("**", (route, request) => {
+			const requestUrl = request.url();
+			if (!requestUrl.startsWith("https://")) {
+				logger.warn(`Blocked request to: ${requestUrl}`);
+				return route.abort();
+			}
+			return route.continue();
 		});
 
-		// await needed here so that we don't close the context before the callback is done
+		const res = await page
+			.goto(url, { waitUntil: "load", timeout: parseInt(env.WEBSEARCH_TIMEOUT) })
+			.catch(() => {
+				console.warn(
+					`Failed to load page within ${parseInt(env.WEBSEARCH_TIMEOUT) / 1000}s: ${url}`
+				);
+			});
+
 		return await callback(page, res ?? undefined);
 	} finally {
-		ctx.close();
+		await ctx.close();
 	}
 }

@@ -33,8 +33,9 @@ MODELS=`[
       "type": "vertex",
       "project": "abc-xyz",
       "location": "europe-west3",
-      "model": "gemini-1.5-pro-preview-0409", // model-name
-
+      "extraBody": {
+         "model_version": "gemini-1.5-pro-002",
+      },
       // Optional
       "safetyThreshold": "BLOCK_MEDIUM_AND_ABOVE",
       "apiEndpoint": "", // alternative api endpoint url,
@@ -44,6 +45,48 @@ MODELS=`[
         }
       }]
     }]
+  }
+]`
+```
+
+## GenAI
+
+Or use the Gemini API API provider [from](https://github.com/google-gemini/generative-ai-js#readme):
+
+Make sure that you have an API key from Google Cloud Platform. To get an API key, follow the instructions [here](https://ai.google.dev/gemini-api/docs/api-key).
+
+You can either specify them directly in your `.env.local` using the `GOOGLE_GENAI_API_KEY` variables, or you can set them directly in the endpoint config.
+
+You can find the list of models available [here](https://ai.google.dev/gemini-api/docs/models/gemini), and experimental models available [here](https://ai.google.dev/gemini-api/docs/models/experimental-models).
+
+```ini
+MODELS=`[
+  {
+    "name": "gemini-1.5-flash",
+    "displayName": "Gemini Flash 1.5",
+    "multimodal": true,
+    "endpoints": [
+      {
+        "type": "genai",
+
+        // Optional
+        "apiKey": "abc...xyz"
+        "safetyThreshold": "BLOCK_MEDIUM_AND_ABOVE",
+      }
+    ]
   },
+  {
+    "name": "gemini-1.5-pro",
+    "displayName": "Gemini Pro 1.5",
+    "multimodal": false,
+    "endpoints": [
+      {
+        "type": "genai",
+
+        // Optional
+        "apiKey": "abc...xyz"
+      }
+    ]
+  }
 ]`
 ```

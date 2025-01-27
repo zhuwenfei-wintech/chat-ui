@@ -1,7 +1,6 @@
-import { ToolResultStatus, type ToolCall, type ToolResult } from "$lib/types/Tool";
+import { ToolResultStatus, type ToolCall, type Tool, type ToolResult } from "$lib/types/Tool";
 import { v4 as uuidV4 } from "uuid";
-import JSON5 from "json5";
-import type { BackendTool, BackendToolContext } from "../tools";
+import { getCallMethod, toolFromConfigs, type BackendToolContext } from "../tools";
 import {
 	MessageToolUpdateType,
 	MessageUpdateStatus,
@@ -10,48 +9,61 @@ import {
 } from "$lib/types/MessageUpdate";
 import type { TextGenerationContext } from "./types";
 
-import { allTools } from "../tools";
 import directlyAnswer from "../tools/directlyAnswer";
 import websearch from "../tools/web/search";
 import { z } from "zod";
 import { logger } from "../logger";
-import { toolHasName } from "../tools/utils";
-import type { MessageFile } from "$lib/types/Message";
+import { extractJson, toolHasName } from "../tools/utils";
 import { mergeAsyncGenerators } from "$lib/utils/mergeAsyncGenerators";
 import { MetricsServer } from "../metrics";
 import { stringifyError } from "$lib/utils/stringifyError";
+import { collections } from "../database";
+import { ObjectId } from "mongodb";
+import type { Message } from "$lib/types/Message";
+import type { Assistant } from "$lib/types/Assistant";
+import { assistantHasWebSearch } from "./assistant";
 
-function makeFilesPrompt(files: MessageFile[], fileMessageIndex: number): string {
-	if (files.length === 0) {
-		return "The user has not uploaded any files. Do not attempt to use any tools that require files";
+export async function getTools(
+	toolsPreference: Array<string>,
+	assistant: Pick<Assistant, "rag" | "tools"> | undefined
+): Promise<Tool[]> {
+	let preferences = toolsPreference;
+
+	if (assistant) {
+		if (assistant?.tools?.length) {
+			preferences = assistant.tools;
+
+			if (assistantHasWebSearch(assistant)) {
+				preferences.push(websearch._id.toString());
+			}
+		} else {
+			if (assistantHasWebSearch(assistant)) {
+				return [websearch, directlyAnswer];
+			}
+			return [directlyAnswer];
+		}
 	}
 
-	const stringifiedFiles = files
-		.map(
-			(file, fileIndex) =>
-				`  - fileMessageIndex ${fileMessageIndex} | fileIndex ${fileIndex} | ${file.name} (${file.mime})`
-		)
-		.join("\n");
-	return `Attached ${files.length} file${files.length === 1 ? "" : "s"}:\n${stringifiedFiles}`;
-}
-
-export function pickTools(
-	toolsPreference: Record<string, boolean>,
-	isAssistant: boolean
-): BackendTool[] {
-	// if it's an assistant, only support websearch for now
-	if (isAssistant) return [directlyAnswer, websearch];
-
 	// filter based on tool preferences, add the tools that are on by default
-	return allTools.filter((el) => {
-		if (el.isLocked && el.isOnByDefault) return true;
-		return toolsPreference?.[el.name] ?? el.isOnByDefault;
+	const activeConfigTools = toolFromConfigs.filter((el) => {
+		if (el.isLocked && el.isOnByDefault && !assistant) return true;
+		return preferences?.includes(el._id.toString()) ?? (el.isOnByDefault && !assistant);
 	});
+
+	// find tool where the id is in preferences
+	const activeCommunityTools = await collections.tools
+		.find({
+			_id: { $in: preferences.map((el) => new ObjectId(el)) },
+		})
+		.toArray()
+		.then((el) => el.map((el) => ({ ...el, call: getCallMethod(el) })));
+
+	return [...activeConfigTools, ...activeCommunityTools];
 }
 
 async function* callTool(
 	ctx: BackendToolContext,
-	tools: BackendTool[],
+	tools: Tool[],
 	call: ToolCall
 ): AsyncGenerator<MessageUpdate, ToolResult | undefined, undefined> {
 	const uuid = uuidV4();
@@ -75,13 +87,13 @@ async function* callTool(
 	};
 
 	try {
-		const toolResult = yield* tool.call(call.parameters, ctx);
+		const toolResult = yield* tool.call(call.parameters, ctx, uuid);
 
 		yield {
 			type: MessageUpdateType.Tool,
 			subtype: MessageToolUpdateType.Result,
 			uuid,
-			result: { ...toolResult, call } as ToolResult,
+			result: { ...toolResult, call, status: ToolResultStatus.Success },
 		};
 
 		MetricsServer.getMetrics().tool.toolUseDuration.observe(
@@ -89,7 +101,9 @@ async function* callTool(
 			Date.now() - startTime
 		);
 
-		return { ...toolResult, call } as ToolResult;
+		await collections.tools.findOneAndUpdate({ _id: tool._id }, { $inc: { useCount: 1 } });
+
+		return { ...toolResult, call, status: ToolResultStatus.Success };
 	} catch (error) {
 		MetricsServer.getMetrics().tool.toolUseCountError.inc({ tool: call.name });
 		logger.error(error, `Failed while running tool ${call.name}. ${stringifyError(error)}`);
@@ -98,41 +112,95 @@ async function* callTool(
 			type: MessageUpdateType.Tool,
 			subtype: MessageToolUpdateType.Error,
 			uuid,
-			message: "Error occurred",
+			message:
+				"An error occurred while calling the tool " + call.name + ": " + stringifyError(error),
 		};
 
 		return {
 			call,
 			status: ToolResultStatus.Error,
-			message: "Error occurred",
+			message:
+				"An error occurred while calling the tool " + call.name + ": " + stringifyError(error),
 		};
 	}
 }
 
 export async function* runTools(
 	ctx: TextGenerationContext,
-	tools: BackendTool[],
+	tools: Tool[],
 	preprompt?: string
 ): AsyncGenerator<MessageUpdate, ToolResult[], undefined> {
 	const { endpoint, conv, messages, assistant, ip, username } = ctx;
 	const calls: ToolCall[] = [];
 
-	const messagesWithFilesPrompt = messages.map((message, idx) => {
-		if (!message.files?.length) return message;
+	const pickToolStartTime = Date.now();
+	// append a message with the list of all available files
+
+	const files = messages.reduce((acc, curr, idx) => {
+		if (curr.files) {
+			const prefix = (curr.from === "user" ? "input" : "ouput") + "_" + idx;
+			acc.push(
+				...curr.files.map(
+					(file, fileIdx) => `${prefix}_${fileIdx}.${file?.name?.split(".")?.pop()?.toLowerCase()}`
+				)
+			);
+		}
+		return acc;
+	}, [] as string[]);
+
+	let formattedMessages = messages.map((message, msgIdx) => {
+		let content = message.content;
+
+		if (message.files && message.files.length > 0) {
+			content +=
+				"\n\nAdded files: \n - " +
+				message.files
+					.map((file, fileIdx) => {
+						const prefix = message.from === "user" ? "input" : "output";
+						const fileName = file.name.split(".").pop()?.toLowerCase();
+
+						return `${prefix}_${msgIdx}_${fileIdx}.${fileName}`;
+					})
+					.join("\n - ");
+		}
+
 		return {
 			...message,
-			content: `${message.content}\n${makeFilesPrompt(message.files, idx)}`,
-		};
+			content,
+		} satisfies Message;
 	});
 
-	const pickToolStartTime = Date.now();
+	const fileMsg = {
+		id: crypto.randomUUID(),
+		from: "system",
+		content:
+			"Here is the list of available filenames that can be used as input for tools. Use the filenames that are in this list. \n The filename structure is as follows : {input for user|output for tool}_{message index in the conversation}_{file index in the list of files}.{file extension} \n - " +
+			files.join("\n - ") +
+			"\n\n\n",
+	} satisfies Message;
+
+	// put fileMsg before last if files.length > 0
+	formattedMessages = files.length
+		? [...formattedMessages.slice(0, -1), fileMsg, ...formattedMessages.slice(-1)]
+		: messages;
+
+	let rawText = "";
+
+	const mappedTools = tools.map((tool) => ({
+		...tool,
+		inputs: tool.inputs.map((input) => ({
+			...input,
+			type: input.type === "file" ? "str" : input.type,
+		})),
+	}));
 
 	// do the function calling bits here
 	for await (const output of await endpoint({
-		messages: messagesWithFilesPrompt,
+		messages: formattedMessages,
 		preprompt,
-		generateSettings: assistant?.generateSettings,
-		tools,
+		generateSettings: { temperature: 0.1, ...assistant?.generateSettings },
+		tools: mappedTools,
+		conversationId: conv._id,
 	})) {
 		// model natively supports tool calls
 		if (output.token.toolCalls) {
@@ -140,29 +208,42 @@ export async function* runTools(
 			continue;
 		}
 
+		if (output.token.text) {
+			rawText += output.token.text;
+		}
+
+		// if we dont see a tool call in the first 25 chars, something is going wrong and we abort
+		if (rawText.length > 100 && !(rawText.includes("```json") || rawText.includes("{"))) {
+			return [];
+		}
+
+		// if we see a directly_answer tool call, we skip the rest
+		if (
+			rawText.includes("directly_answer") ||
+			rawText.includes("directlyAnswer") ||
+			rawText.includes("directly-answer")
+		) {
+			return [];
+		}
+
 		// look for a code blocks of ```json and parse them
 		// if they're valid json, add them to the calls array
 		if (output.generated_text) {
-			const codeBlocks = Array.from(output.generated_text.matchAll(/```json\n(.*?)```/gs))
-				.map(([, block]) => block)
-				// remove trailing comma
-				.map((block) => block.trim().replace(/,$/, ""));
-			if (codeBlocks.length === 0) continue;
+			try {
+				const rawCalls = await extractJson(output.generated_text);
+				const newCalls = rawCalls
+					.map((call) => externalToToolCall(call, tools))
+					.filter((call) => call !== undefined) as ToolCall[];
 
-			// grab only the capture group from the regex match
-			for (const block of codeBlocks) {
-				try {
-					calls.push(
-						...JSON5.parse(block).filter(isExternalToolCall).map(externalToToolCall).filter(Boolean)
-					);
-				} catch (e) {
-					// error parsing the calls
-					yield {
-						type: MessageUpdateType.Status,
-						status: MessageUpdateStatus.Error,
-						message: "Error while parsing tool calls, please retry",
-					};
-				}
+				calls.push(...newCalls);
+			} catch (e) {
+				logger.warn({ rawCall: output.generated_text, error: e }, "Error while parsing tool calls");
+				// error parsing the calls
+				yield {
+					type: MessageUpdateType.Status,
+					status: MessageUpdateStatus.Error,
+					message: "Error while parsing tool calls.",
+				};
 			}
 		}
 	}
@@ -179,48 +260,84 @@ export async function* runTools(
 	return toolResults.filter((result): result is ToolResult => result !== undefined);
 }
 
-const externalToolCall = z.object({
-	tool_name: z.string(),
-	parameters: z.record(z.any()),
-});
+function externalToToolCall(call: unknown, tools: Tool[]): ToolCall | undefined {
+	// Early return if invalid input
+	if (!isValidCallObject(call)) {
+		return undefined;
+	}
 
-type ExternalToolCall = z.infer<typeof externalToolCall>;
+	const parsedCall = parseExternalCall(call);
+	if (!parsedCall) return undefined;
 
-function isExternalToolCall(call: unknown): call is ExternalToolCall {
-	return externalToolCall.safeParse(call).success;
-}
-
-function externalToToolCall(call: ExternalToolCall): ToolCall | undefined {
-	// Convert - to _ since some models insist on using _ instead of -
-	const tool = allTools.find((tool) => toolHasName(call.tool_name, tool));
+	const tool = tools.find((tool) => toolHasName(parsedCall.tool_name, tool));
 	if (!tool) {
-		logger.debug(`Model requested tool that does not exist: "${call.tool_name}". Skipping tool...`);
-		return;
+		logger.debug(
+			`Model requested tool that does not exist: "${parsedCall.tool_name}". Skipping tool...`
+		);
+		return undefined;
 	}
 
 	const parametersWithDefaults: Record<string, string> = {};
 
-	for (const [key, definition] of Object.entries(tool.parameterDefinitions)) {
-		const value = call.parameters[key];
+	for (const input of tool.inputs) {
+		const value = parsedCall.parameters[input.name];
 
 		// Required so ensure it's there, otherwise return undefined
-		if (definition.required) {
+		if (input.paramType === "required") {
 			if (value === undefined) {
 				logger.debug(
-					`Model requested tool "${call.tool_name}" but was missing required parameter "${key}". Skipping tool...`
+					`Model requested tool "${parsedCall.tool_name}" but was missing required parameter "${input.name}". Skipping tool...`
 				);
 				return;
 			}
-			parametersWithDefaults[key] = value;
+			parametersWithDefaults[input.name] = value;
 			continue;
 		}
 
 		// Optional so use default if not there
-		parametersWithDefaults[key] = value ?? definition.default;
+		parametersWithDefaults[input.name] = value;
+
+		if (input.paramType === "optional") {
+			parametersWithDefaults[input.name] ??= input.default.toString();
+		}
 	}
 
 	return {
-		name: call.tool_name,
+		name: parsedCall.tool_name,
 		parameters: parametersWithDefaults,
 	};
+}
+
+// Helper functions
+function isValidCallObject(call: unknown): call is Record<string, unknown> {
+	return typeof call === "object" && call !== null;
+}
+
+function parseExternalCall(callObj: Record<string, unknown>) {
+	const nameFields = ["tool_name", "name"] as const;
+	const parametersFields = ["parameters", "arguments", "parameter_definitions"] as const;
+
+	const groupedCall = {
+		tool_name: "" as string,
+		parameters: undefined as Record<string, string> | undefined,
+	};
+
+	for (const name of nameFields) {
+		if (callObj[name]) {
+			groupedCall.tool_name = callObj[name] as string;
+		}
+	}
+
+	for (const name of parametersFields) {
+		if (callObj[name]) {
+			groupedCall.parameters = callObj[name] as Record<string, string>;
+		}
+	}
+
+	return z
+		.object({
+			tool_name: z.string(),
+			parameters: z.record(z.any()),
+		})
+		.parse(groupedCall);
 }

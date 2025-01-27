@@ -15,6 +15,6 @@ export const actions = {
 			secure: false,
 			httpOnly: true,
 		});
-		throw redirect(303, `${base}/`);
+		redirect(303, `${base}/`);
 	},
 };

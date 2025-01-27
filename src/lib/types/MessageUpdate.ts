@@ -8,7 +8,8 @@ export type MessageUpdate =
 	| MessageWebSearchUpdate
 	| MessageStreamUpdate
 	| MessageFileUpdate
-	| MessageFinalAnswerUpdate;
+	| MessageFinalAnswerUpdate
+	| MessageReasoningUpdate;
 
 export enum MessageUpdateType {
 	Status = "status",
@@ -18,6 +19,7 @@ export enum MessageUpdateType {
 	Stream = "stream",
 	File = "file",
 	FinalAnswer = "finalAnswer",
+	Reasoning = "reasoning",
 }
 
 // Status
@@ -25,6 +27,7 @@ export enum MessageUpdateStatus {
 	Started = "started",
 	Error = "error",
 	Finished = "finished",
+	KeepAlive = "keepAlive",
 }
 export interface MessageStatusUpdate {
 	type: MessageUpdateType.Status;
@@ -74,7 +77,10 @@ export enum MessageToolUpdateType {
 	Result = "result",
 	/** Error while running tool */
 	Error = "error",
+	/** ETA update */
+	ETA = "eta",
 }
+
 interface MessageToolBaseUpdate<TSubType extends MessageToolUpdateType> {
 	type: MessageUpdateType.Tool;
 	subtype: TSubType;
@@ -90,10 +96,16 @@ export interface MessageToolResultUpdate
 export interface MessageToolErrorUpdate extends MessageToolBaseUpdate<MessageToolUpdateType.Error> {
 	message: string;
 }
+
+export interface MessageToolETAUpdate extends MessageToolBaseUpdate<MessageToolUpdateType.ETA> {
+	eta: number;
+}
+
 export type MessageToolUpdate =
 	| MessageToolCallUpdate
 	| MessageToolResultUpdate
-	| MessageToolErrorUpdate;
+	| MessageToolErrorUpdate
+	| MessageToolETAUpdate;
 
 // Everything else
 export interface MessageTitleUpdate {
@@ -104,6 +116,25 @@ export interface MessageStreamUpdate {
 	type: MessageUpdateType.Stream;
 	token: string;
 }
+
+export enum MessageReasoningUpdateType {
+	Stream = "stream",
+	Status = "status",
+}
+
+export type MessageReasoningUpdate = MessageReasoningStreamUpdate | MessageReasoningStatusUpdate;
+
+export interface MessageReasoningStreamUpdate {
+	type: MessageUpdateType.Reasoning;
+	subtype: MessageReasoningUpdateType.Stream;
+	token: string;
+}
+export interface MessageReasoningStatusUpdate {
+	type: MessageUpdateType.Reasoning;
+	subtype: MessageReasoningUpdateType.Status;
+	status: string;
+}
+
 export interface MessageFileUpdate {
 	type: MessageUpdateType.File;
 	name: string;
@@ -114,4 +145,5 @@ export interface MessageFinalAnswerUpdate {
 	type: MessageUpdateType.FinalAnswer;
 	text: string;
 	interrupted: boolean;
+	webSources?: { uri: string; title: string }[];
 }

@@ -8,6 +8,8 @@ import { endpointOAIParametersSchema, endpointOai } from "./openai/endpointOai";
 import endpointLlamacpp, { endpointLlamacppParametersSchema } from "./llamacpp/endpointLlamacpp";
 import endpointOllama, { endpointOllamaParametersSchema } from "./ollama/endpointOllama";
 import endpointVertex, { endpointVertexParametersSchema } from "./google/endpointVertex";
+import endpointGenAI, { endpointGenAIParametersSchema } from "./google/endpointGenAI";
+import { endpointBedrock, endpointBedrockParametersSchema } from "./aws/endpointBedrock";
 
 import {
 	endpointAnthropic,
@@ -27,6 +29,7 @@ import endpointLangserve, {
 } from "./langserve/endpointLangserve";
 
 import type { Tool, ToolCall, ToolResult } from "$lib/types/Tool";
+import type { ObjectId } from "mongodb";
 
 export type EndpointMessage = Omit<Message, "id">;
 
@@ -39,18 +42,20 @@ export interface EndpointParameters {
 	tools?: Tool[];
 	toolResults?: ToolResult[];
 	isMultimodal?: boolean;
+	conversationId?: ObjectId;
 }
 
 interface CommonEndpoint {
 	weight: number;
 }
-type TextGenerationStreamOutputWithTools = TextGenerationStreamOutput & {
+export type TextGenerationStreamOutputWithToolsAndWebSources = TextGenerationStreamOutput & {
 	token: TextGenerationStreamToken & { toolCalls?: ToolCall[] };
+	webSources?: { uri: string; title: string }[];
 };
 // type signature for the endpoint
 export type Endpoint = (
 	params: EndpointParameters
-) => Promise<AsyncGenerator<TextGenerationStreamOutputWithTools, void, void>>;
+) => Promise<AsyncGenerator<TextGenerationStreamOutputWithToolsAndWebSources, void, void>>;
 
 // generator function that takes in parameters for defining the endpoint and return the endpoint
 export type EndpointGenerator<T extends CommonEndpoint> = (parameters: T) => Endpoint;
@@ -60,11 +65,13 @@ export const endpoints = {
 	tgi: endpointTgi,
 	anthropic: endpointAnthropic,
 	anthropicvertex: endpointAnthropicVertex,
+	bedrock: endpointBedrock,
 	aws: endpointAws,
 	openai: endpointOai,
 	llamacpp: endpointLlamacpp,
 	ollama: endpointOllama,
 	vertex: endpointVertex,
+	genai: endpointGenAI,
 	cloudflare: endpointCloudflare,
 	cohere: endpointCohere,
 	langserve: endpointLangserve,
@@ -74,11 +81,13 @@ export const endpointSchema = z.discriminatedUnion("type", [
 	endpointAnthropicParametersSchema,
 	endpointAnthropicVertexParametersSchema,
 	endpointAwsParametersSchema,
+	endpointBedrockParametersSchema,
 	endpointOAIParametersSchema,
 	endpointTgiParametersSchema,
 	endpointLlamacppParametersSchema,
 	endpointOllamaParametersSchema,
 	endpointVertexParametersSchema,
+	endpointGenAIParametersSchema,
 	endpointCloudflareParametersSchema,
 	endpointCohereParametersSchema,
 	endpointLangserveParametersSchema,
